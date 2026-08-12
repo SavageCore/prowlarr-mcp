@@ -24,7 +24,12 @@ Always use the `make bump-*` targets to bump the version (`uv version --bump pat
   git push origin main
   git push origin v<version>
   ```
-- This server is not yet deployed to the Proxmox host or the christopfarr project copy. When it is, follow the pattern in the other `-mcp` servers: push tags, sync the project copy, then `ssh root@192.168.50.3 -- 'cd /root/prowlarr-mcp && git fetch origin && git reset --hard origin/main && uv tool install --force .'`.
+- Deploy to the Proxmox host (root SSH key): pull the repo then reinstall the uv tool:
+  ```
+  ssh root@192.168.50.3 -- 'cd /root/prowlarr-mcp && git fetch origin && git reset --hard origin/main'
+  ssh root@192.168.50.3 -- 'cd /root/prowlarr-mcp && uv tool install --force .'
+  ```
+  The host runs it via `uv tool install` → `/root/.local/bin/prowlarr-mcp` (not from the repo). There is no `/home/savagecore/Documents/christopfarr/mcp/prowlarr-mcp` copy.
 
 ## Read/write notes
 The Prowlarr API is not read-only: every tool is NOT marked read-only. Conventions:
