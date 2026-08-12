@@ -1,0 +1,22 @@
+[project]
+name = "prowlarr-mcp"
+version = "0.0.0"
+description = "MCP server for Prowlarr's API v1"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = ["fastmcp>=2.0.0"]
+
+[project.scripts]
+prowlarr-mcp = "prowlarr_mcp:main"
+
+[dependency-groups]
+dev = ["pytest>=8.0.0", "pytest-asyncio>=0.24.0"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = ["integration: hits a real Prowlarr instance (needs PROWLARR_URL/PROWLARR_API_KEY)"]
+addopts = "-m 'not integration'"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
