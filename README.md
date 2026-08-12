@@ -1,5 +1,6 @@
 # prowlarr-mcp
 
+Part of the [arr-mcps](https://github.com/SavageCore/arr-mcps) collection.
 MCP server exposing [Prowlarr](https://github.com/Prowlarr/Prowlarr)'s API v1
 (REST) as tools, so an LLM can manage your indexers, applications, download
 clients, indexer proxies, notifications, tags, and custom filters — plus run
