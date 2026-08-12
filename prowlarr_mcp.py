@@ -1,25 +1,35 @@
 """MCP server exposing Prowlarr's API v1 (https://github.com/Prowlarr/Prowlarr) as tools.
 
-One tool per API operation (see README for the full list). Auth is the
-X-Api-Key header -- generate the key in Prowlarr Settings > General. Unlike
-tracearr-mcp, Prowlarr has a full read/write surface: GET tools are marked
-readOnlyHint, DELETE tools (and system shutdown/restart) are destructiveHint,
-and POST/PUT tools create/update/test/trigger actions. Write tools take a
-`body` JSON object; list a resource's schema first to discover its fields.
+Full API coverage (see README for the operation list), exposed as 10
+resource-scoped *portmanteau* tools instead of one tool per operation. Each
+portmanteau tool (e.g. prowlarr_indexers, prowlarr_applications) takes an
+`operation` enum plus an `arguments` dict; see AGENTS.md for the rationale
+(a 100+-tool server blows the MCP context budget on session start).
+
+Auth is the X-Api-Key header -- generate the key in Prowlarr Settings >
+General. A group tool is marked readOnlyHint=True only when every operation
+in it was originally a GET tool; mixed groups carry no hints. Write
+operations take a `body` JSON object; list a resource's schema first to
+discover its fields.
 
 Paths given to _req that already start with `/` (like /api and /ping) are used
 verbatim against the server root; everything else is prefixed with /api/v1.
+Every function below is still a plain async endpoint wrapper - `_GROUPS` near
+the bottom buckets them by resource and `_register_group` wraps each bucket
+in one dispatching MCP tool; the functions themselves are not tools anymore.
 """
 
 import base64
+import inspect
 import os
 import sys
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 import httpx
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from fastmcp.tools import Tool
 from mcp.types import ToolAnnotations
 
 READONLY = ToolAnnotations(readOnlyHint=True)
@@ -40,9 +50,13 @@ mcp = FastMCP("prowlarr-mcp")
 _client: httpx.AsyncClient | None = None
 
 
-def build_client(base_url: str, api_key: str | None, transport: httpx.BaseTransport | None = None) -> httpx.AsyncClient:
+def build_client(
+    base_url: str, api_key: str | None, transport: httpx.BaseTransport | None = None
+) -> httpx.AsyncClient:
     headers = {"X-Api-Key": api_key} if api_key else {}
-    return httpx.AsyncClient(base_url=base_url.rstrip("/"), headers=headers, transport=transport)
+    return httpx.AsyncClient(
+        base_url=base_url.rstrip("/"), headers=headers, transport=transport
+    )
 
 
 async def _req_raw(
@@ -101,7 +115,7 @@ def _omit(params: dict[str, Any]) -> dict[str, Any]:
 
 # --- ApiInfo ------------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_get_api_info() -> JSONObj:
     """Report the current API version, the API key hash (last 4 chars), and
     deprecated endpoints. Useful for confirming connectivity and version."""
@@ -110,73 +124,73 @@ async def prowlarr_get_api_info() -> JSONObj:
 
 # --- Applications --------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_list_applications() -> JSONVal:
     """List all configured applications (Lidarr/Radarr/Sonarr/Readarr etc.)
     that indexers are synced to."""
     return await _req("GET", "applications")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_get_application(id: int) -> JSONObj:
     """Get a single application by id."""
     return await _req("GET", f"applications/{_id(id)}")
 
 
-@mcp.tool
-async def prowlarr_create_application(body: JSONObj, force_save: bool | None = None) -> JSONObj:
+async def prowlarr_create_application(
+    body: JSONObj, force_save: bool | None = None
+) -> JSONObj:
     """Create an application. Pass the full ApplicationResource as body (fetch
     prowlarr_list_application_schemas for available providers and fields).
     force_save bypasses validation."""
     return await _req("POST", "applications", _omit({"forceSave": force_save}), body)
 
 
-@mcp.tool
-async def prowlarr_update_application(id: int, body: JSONObj, force_save: bool | None = None) -> JSONObj:
+async def prowlarr_update_application(
+    id: int, body: JSONObj, force_save: bool | None = None
+) -> JSONObj:
     """Update an application by id. body is the ApplicationResource to save."""
-    return await _req("PUT", f"applications/{_id(id)}", _omit({"forceSave": force_save}), body)
+    return await _req(
+        "PUT", f"applications/{_id(id)}", _omit({"forceSave": force_save}), body
+    )
 
 
-@mcp.tool(annotations=DESTRUCTIVE)
 async def prowlarr_delete_application(id: int) -> JSONObj:
     """Delete an application by id."""
     return await _req("DELETE", f"applications/{_id(id)}")
 
 
-@mcp.tool
 async def prowlarr_bulk_update_applications(body: JSONObj) -> JSONObj:
     """Bulk-edit applications. body is an ApplicationBulkResource with ids plus
     optional tags/applyTags/enable to apply to all of them."""
     return await _req("PUT", "applications/bulk", body=body)
 
 
-@mcp.tool(annotations=DESTRUCTIVE)
 async def prowlarr_bulk_delete_applications(body: JSONObj) -> JSONObj:
     """Bulk-delete applications. body is an ApplicationBulkResource with ids."""
     return await _req("DELETE", "applications/bulk", body=body)
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_list_application_schemas() -> JSONVal:
     """List application provider schemas (what each application implementation
     accepts). Read this before creating/updating an application."""
     return await _req("GET", "applications/schema")
 
 
-@mcp.tool
-async def prowlarr_test_application(body: JSONObj, force_test: bool | None = None) -> JSONObj:
+async def prowlarr_test_application(
+    body: JSONObj, force_test: bool | None = None
+) -> JSONObj:
     """Test an application connection without saving it. body is the
     ApplicationResource to test. force_test skips the cached-test check."""
-    return await _req("POST", "applications/test", _omit({"forceTest": force_test}), body)
+    return await _req(
+        "POST", "applications/test", _omit({"forceTest": force_test}), body
+    )
 
 
-@mcp.tool
 async def prowlarr_test_all_applications() -> JSONObj:
     """Test every configured application."""
     return await _req("POST", "applications/testall")
 
 
-@mcp.tool
 async def prowlarr_application_action(name: str, body: JSONObj) -> JSONObj:
     """Run a named action on an application (e.g. sync indexers). body is the
     ApplicationResource to act on."""
@@ -185,38 +199,33 @@ async def prowlarr_application_action(name: str, body: JSONObj) -> JSONObj:
 
 # --- App Profiles ---------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_list_app_profiles() -> JSONVal:
     """List app profiles (named groups of applications, added in Prowlarr 1.19+)."""
     return await _req("GET", "appprofile")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_get_app_profile(id: int) -> JSONObj:
     """Get a single app profile by id."""
     return await _req("GET", f"appprofile/{_id(id)}")
 
 
-@mcp.tool
 async def prowlarr_create_app_profile(body: JSONObj) -> JSONObj:
     """Create an app profile. body is an AppProfileResource (name, appIds, and
     per-app settings)."""
     return await _req("POST", "appprofile", body=body)
 
 
-@mcp.tool
 async def prowlarr_update_app_profile(id: int, body: JSONObj) -> JSONObj:
     """Update an app profile by id."""
     return await _req("PUT", f"appprofile/{_id(id)}", body=body)
 
 
-@mcp.tool(annotations=DESTRUCTIVE)
 async def prowlarr_delete_app_profile(id: int) -> JSONObj:
     """Delete an app profile by id."""
     return await _req("DELETE", f"appprofile/{_id(id)}")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_list_app_profile_schemas() -> JSONVal:
     """List app profile schemas describing the structure of each app profile
     form section."""
@@ -225,25 +234,22 @@ async def prowlarr_list_app_profile_schemas() -> JSONVal:
 
 # --- Backups -------------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_list_backups() -> JSONVal:
     """List scheduled, manual, and update backups available on the server."""
     return await _req("GET", "system/backup")
 
 
-@mcp.tool(annotations=DESTRUCTIVE)
 async def prowlarr_delete_backup(id: int) -> JSONObj:
     """Delete a backup file by id."""
     return await _req("DELETE", f"system/backup/{_id(id)}")
 
 
-@mcp.tool
 async def prowlarr_restore_backup(id: int) -> JSONObj:
     """Restore a backup by id. Triggers a restore on the next restart."""
     return await _req("POST", f"system/backup/restore/{_id(id)}")
 
 
-@mcp.tool
 async def prowlarr_restore_backup_upload(body: JSONObj) -> JSONObj:
     """Restore a user-uploaded backup file. body must be
     {"content": "<base64-encoded backup bytes>", "filename": "backup.zip"}."""
@@ -253,19 +259,17 @@ async def prowlarr_restore_backup_upload(body: JSONObj) -> JSONObj:
 
 # --- Commands -------------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_list_commands() -> JSONVal:
     """List all tasks currently queued or running."""
     return await _req("GET", "command")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_get_command(id: int) -> JSONObj:
     """Get a single task by id."""
     return await _req("GET", f"command/{_id(id)}")
 
 
-@mcp.tool
 async def prowlarr_run_command(body: JSONObj) -> JSONObj:
     """Run a command. body is a CommandResource with a `name` (e.g.
     ApplicationIndexerSync, IndexerRssSync, RefreshIndexerProxy,
@@ -273,7 +277,6 @@ async def prowlarr_run_command(body: JSONObj) -> JSONObj:
     return await _req("POST", "command", body=body)
 
 
-@mcp.tool(annotations=DESTRUCTIVE)
 async def prowlarr_cancel_command(id: int) -> JSONObj:
     """Cancel a queued or running task by id."""
     return await _req("DELETE", f"command/{_id(id)}")
@@ -281,32 +284,28 @@ async def prowlarr_cancel_command(id: int) -> JSONObj:
 
 # --- Custom Filters --------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_list_custom_filters() -> JSONVal:
     """List user-defined custom filters used to narrow indexer search results."""
     return await _req("GET", "customfilter")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_get_custom_filter(id: int) -> JSONObj:
     """Get a single custom filter by id."""
     return await _req("GET", f"customfilter/{_id(id)}")
 
 
-@mcp.tool
 async def prowlarr_create_custom_filter(body: JSONObj) -> JSONObj:
     """Create a custom filter. body is a CustomFilterResource with a name,
     label, type (e.g. release), and filters array."""
     return await _req("POST", "customfilter", body=body)
 
 
-@mcp.tool
 async def prowlarr_update_custom_filter(id: int, body: JSONObj) -> JSONObj:
     """Update a custom filter by id."""
     return await _req("PUT", f"customfilter/{_id(id)}", body=body)
 
 
-@mcp.tool(annotations=DESTRUCTIVE)
 async def prowlarr_delete_custom_filter(id: int) -> JSONObj:
     """Delete a custom filter by id."""
     return await _req("DELETE", f"customfilter/{_id(id)}")
@@ -314,50 +313,43 @@ async def prowlarr_delete_custom_filter(id: int) -> JSONObj:
 
 # --- Config: Host / UI / DownloadClient / Development ------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_get_host_config() -> JSONObj:
     """Get the host configuration (binding, port, SSL, authentication, API key,
     proxy settings, update/backup settings)."""
     return await _req("GET", "config/host")
 
 
-@mcp.tool
 async def prowlarr_update_host_config(id: int, body: JSONObj) -> JSONObj:
     """Update the host configuration by id. body is a HostConfigResource."""
     return await _req("PUT", f"config/host/{_id(id)}", body=body)
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_get_ui_config() -> JSONObj:
     """Get the UI configuration (language, theme, first-day-of-week, etc.)."""
     return await _req("GET", "config/ui")
 
 
-@mcp.tool
 async def prowlarr_update_ui_config(id: int, body: JSONObj) -> JSONObj:
     """Update the UI configuration by id."""
     return await _req("PUT", f"config/ui/{_id(id)}", body=body)
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_get_download_client_config() -> JSONObj:
     """Get the download client config (which clients get grabs from indexers)."""
     return await _req("GET", "config/downloadclient")
 
 
-@mcp.tool
 async def prowlarr_update_download_client_config(id: int, body: JSONObj) -> JSONObj:
     """Update the download client config by id."""
     return await _req("PUT", f"config/downloadclient/{_id(id)}", body=body)
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_get_development_config() -> JSONObj:
     """Get the development config (debug/logging toggles)."""
     return await _req("GET", "config/development")
 
 
-@mcp.tool
 async def prowlarr_update_development_config(id: int, body: JSONObj) -> JSONObj:
     """Update the development config by id."""
     return await _req("PUT", f"config/development/{_id(id)}", body=body)
@@ -365,71 +357,71 @@ async def prowlarr_update_development_config(id: int, body: JSONObj) -> JSONObj:
 
 # --- Download Clients --------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_list_download_clients() -> JSONVal:
     """List all configured download clients."""
     return await _req("GET", "downloadclient")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_get_download_client(id: int) -> JSONObj:
     """Get a single download client by id."""
     return await _req("GET", f"downloadclient/{_id(id)}")
 
 
-@mcp.tool
-async def prowlarr_create_download_client(body: JSONObj, force_save: bool | None = None) -> JSONObj:
+async def prowlarr_create_download_client(
+    body: JSONObj, force_save: bool | None = None
+) -> JSONObj:
     """Create a download client. body is a DownloadClientResource (fetch
     prowlarr_list_download_client_schemas for providers and fields).
     force_save bypasses validation."""
     return await _req("POST", "downloadclient", _omit({"forceSave": force_save}), body)
 
 
-@mcp.tool
-async def prowlarr_update_download_client(id: int, body: JSONObj, force_save: bool | None = None) -> JSONObj:
+async def prowlarr_update_download_client(
+    id: int, body: JSONObj, force_save: bool | None = None
+) -> JSONObj:
     """Update a download client by id."""
-    return await _req("PUT", f"downloadclient/{_id(id)}", _omit({"forceSave": force_save}), body)
+    return await _req(
+        "PUT", f"downloadclient/{_id(id)}", _omit({"forceSave": force_save}), body
+    )
 
 
-@mcp.tool(annotations=DESTRUCTIVE)
 async def prowlarr_delete_download_client(id: int) -> JSONObj:
     """Delete a download client by id."""
     return await _req("DELETE", f"downloadclient/{_id(id)}")
 
 
-@mcp.tool
 async def prowlarr_bulk_update_download_clients(body: JSONObj) -> JSONObj:
     """Bulk-edit download clients. body is a DownloadClientBulkResource with
     ids plus optional tags/applyTags/enable."""
     return await _req("PUT", "downloadclient/bulk", body=body)
 
 
-@mcp.tool(annotations=DESTRUCTIVE)
 async def prowlarr_bulk_delete_download_clients(body: JSONObj) -> JSONObj:
     """Bulk-delete download clients. body is a DownloadClientBulkResource."""
     return await _req("DELETE", "downloadclient/bulk", body=body)
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_list_download_client_schemas() -> JSONVal:
     """List download client provider schemas. Read this before creating or
     updating a download client."""
     return await _req("GET", "downloadclient/schema")
 
 
-@mcp.tool
-async def prowlarr_test_download_client(body: JSONObj, force_test: bool | None = None) -> JSONObj:
+async def prowlarr_test_download_client(
+    body: JSONObj, force_test: bool | None = None
+) -> JSONObj:
     """Test a download client connection without saving it."""
-    return await _req("POST", "downloadclient/test", _omit({"forceTest": force_test}), body)
+    return await _req(
+        "POST", "downloadclient/test", _omit({"forceTest": force_test}), body
+    )
 
 
-@mcp.tool
 async def prowlarr_test_all_download_clients() -> JSONObj:
     """Test every configured download client."""
     return await _req("POST", "downloadclient/testall")
 
 
-@mcp.tool
 async def prowlarr_download_client_action(name: str, body: JSONObj) -> JSONObj:
     """Run a named action on a download client (e.g. clear failed downloads)."""
     return await _req("POST", f"downloadclient/action/{_id(name)}", body=body)
@@ -437,7 +429,7 @@ async def prowlarr_download_client_action(name: str, body: JSONObj) -> JSONObj:
 
 # --- Filesystem -------------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_list_filesystem(
     path: str = "",
     include_files: bool | None = None,
@@ -458,7 +450,6 @@ async def prowlarr_list_filesystem(
     )
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_get_filesystem_type(path: str) -> JSONObj:
     """Report whether a filesystem path is a file or a directory."""
     return await _req("GET", "filesystem/type", _omit({"path": path}))
@@ -466,7 +457,7 @@ async def prowlarr_get_filesystem_type(path: str) -> JSONObj:
 
 # --- Health -----------------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_list_health() -> JSONVal:
     """List health checks: warnings/errors about indexers, applications,
     download clients, proxies, and system settings."""
@@ -475,7 +466,7 @@ async def prowlarr_list_health() -> JSONVal:
 
 # --- History ----------------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_list_history(
     page: int = 1,
     page_size: int = 10,
@@ -506,15 +497,17 @@ async def prowlarr_list_history(
     )
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_list_history_since(date: str, event_type: str = "") -> JSONVal:
     """History records since an ISO date. event_type is a HistoryEventType value
     (e.g. indexerQuery, indexerRss, indexerAuth, indexerInfo, indexerDownload)."""
-    return await _req("GET", "history/since", _omit({"date": date, "eventType": event_type}))
+    return await _req(
+        "GET", "history/since", _omit({"date": date, "eventType": event_type})
+    )
 
 
-@mcp.tool(annotations=READONLY)
-async def prowlarr_list_history_indexer(indexer_id: int | None = None, event_type: str = "", limit: int | None = None) -> JSONVal:
+async def prowlarr_list_history_indexer(
+    indexer_id: int | None = None, event_type: str = "", limit: int | None = None
+) -> JSONVal:
     """History records for a single indexer, newest first, optionally limited."""
     return await _req(
         "GET",
@@ -525,78 +518,75 @@ async def prowlarr_list_history_indexer(indexer_id: int | None = None, event_typ
 
 # --- Indexers ----------------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_list_indexers() -> JSONVal:
     """List all configured indexers with their settings, status, and category
     mappings."""
     return await _req("GET", "indexer")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_get_indexer(id: int) -> JSONObj:
     """Get a single indexer by id."""
     return await _req("GET", f"indexer/{_id(id)}")
 
 
-@mcp.tool
-async def prowlarr_create_indexer(body: JSONObj, force_save: bool | None = None) -> JSONObj:
+async def prowlarr_create_indexer(
+    body: JSONObj, force_save: bool | None = None
+) -> JSONObj:
     """Create an indexer. body is an IndexerResource (fetch
     prowlarr_list_indexer_schemas for the provider definition). force_save
     bypasses validation (e.g. for disabled indexers)."""
     return await _req("POST", "indexer", _omit({"forceSave": force_save}), body)
 
 
-@mcp.tool
-async def prowlarr_update_indexer(id: int, body: JSONObj, force_save: bool | None = None) -> JSONObj:
+async def prowlarr_update_indexer(
+    id: int, body: JSONObj, force_save: bool | None = None
+) -> JSONObj:
     """Update an indexer by id."""
-    return await _req("PUT", f"indexer/{_id(id)}", _omit({"forceSave": force_save}), body)
+    return await _req(
+        "PUT", f"indexer/{_id(id)}", _omit({"forceSave": force_save}), body
+    )
 
 
-@mcp.tool(annotations=DESTRUCTIVE)
 async def prowlarr_delete_indexer(id: int) -> JSONObj:
     """Delete an indexer by id."""
     return await _req("DELETE", f"indexer/{_id(id)}")
 
 
-@mcp.tool
 async def prowlarr_bulk_update_indexers(body: JSONObj) -> JSONObj:
     """Bulk-edit indexers. body is an IndexerBulkResource with ids plus optional
     tags/applyTags/enable/appProfileId to apply to all of them."""
     return await _req("PUT", "indexer/bulk", body=body)
 
 
-@mcp.tool(annotations=DESTRUCTIVE)
 async def prowlarr_bulk_delete_indexers(body: JSONObj) -> JSONObj:
     """Bulk-delete indexers. body is an IndexerBulkResource with ids."""
     return await _req("DELETE", "indexer/bulk", body=body)
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_list_indexer_schemas() -> JSONVal:
     """List indexer provider schemas (definitions of every supported indexer
     type and its fields). Read this before creating an indexer."""
     return await _req("GET", "indexer/schema")
 
 
-@mcp.tool
-async def prowlarr_test_indexer(body: JSONObj, force_test: bool | None = None) -> JSONObj:
+async def prowlarr_test_indexer(
+    body: JSONObj, force_test: bool | None = None
+) -> JSONObj:
     """Test an indexer connection without saving it."""
     return await _req("POST", "indexer/test", _omit({"forceTest": force_test}), body)
 
 
-@mcp.tool
 async def prowlarr_test_all_indexers() -> JSONObj:
     """Test every configured indexer."""
     return await _req("POST", "indexer/testall")
 
 
-@mcp.tool
 async def prowlarr_indexer_action(name: str, body: JSONObj) -> JSONObj:
     """Run a named action on an indexer (e.g. reset indexer status)."""
     return await _req("POST", f"indexer/action/{_id(name)}", body=body)
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_list_indexer_categories() -> JSONVal:
     """List the default indexer categories (tv, movies, music, books, and
     subcategories) with their ids and parents."""
@@ -605,59 +595,61 @@ async def prowlarr_list_indexer_categories() -> JSONVal:
 
 # --- Indexer Proxies ---------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_list_indexer_proxies() -> JSONVal:
     """List all configured indexer proxies (HTTP/Socks5 for connecting to
     indexers)."""
     return await _req("GET", "indexerproxy")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_get_indexer_proxy(id: int) -> JSONObj:
     """Get a single indexer proxy by id."""
     return await _req("GET", f"indexerproxy/{_id(id)}")
 
 
-@mcp.tool
-async def prowlarr_create_indexer_proxy(body: JSONObj, force_save: bool | None = None) -> JSONObj:
+async def prowlarr_create_indexer_proxy(
+    body: JSONObj, force_save: bool | None = None
+) -> JSONObj:
     """Create an indexer proxy. body is an IndexerProxyResource (fetch
     prowlarr_list_indexer_proxy_schemas for providers). force_save bypasses
     validation."""
     return await _req("POST", "indexerproxy", _omit({"forceSave": force_save}), body)
 
 
-@mcp.tool
-async def prowlarr_update_indexer_proxy(id: int, body: JSONObj, force_save: bool | None = None) -> JSONObj:
+async def prowlarr_update_indexer_proxy(
+    id: int, body: JSONObj, force_save: bool | None = None
+) -> JSONObj:
     """Update an indexer proxy by id."""
-    return await _req("PUT", f"indexerproxy/{_id(id)}", _omit({"forceSave": force_save}), body)
+    return await _req(
+        "PUT", f"indexerproxy/{_id(id)}", _omit({"forceSave": force_save}), body
+    )
 
 
-@mcp.tool(annotations=DESTRUCTIVE)
 async def prowlarr_delete_indexer_proxy(id: int) -> JSONObj:
     """Delete an indexer proxy by id."""
     return await _req("DELETE", f"indexerproxy/{_id(id)}")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_list_indexer_proxy_schemas() -> JSONVal:
     """List indexer proxy provider schemas. Read this before creating or
     updating a proxy."""
     return await _req("GET", "indexerproxy/schema")
 
 
-@mcp.tool
-async def prowlarr_test_indexer_proxy(body: JSONObj, force_test: bool | None = None) -> JSONObj:
+async def prowlarr_test_indexer_proxy(
+    body: JSONObj, force_test: bool | None = None
+) -> JSONObj:
     """Test an indexer proxy connection without saving it."""
-    return await _req("POST", "indexerproxy/test", _omit({"forceTest": force_test}), body)
+    return await _req(
+        "POST", "indexerproxy/test", _omit({"forceTest": force_test}), body
+    )
 
 
-@mcp.tool
 async def prowlarr_test_all_indexer_proxies() -> JSONObj:
     """Test every configured indexer proxy."""
     return await _req("POST", "indexerproxy/testall")
 
 
-@mcp.tool
 async def prowlarr_indexer_proxy_action(name: str, body: JSONObj) -> JSONObj:
     """Run a named action on an indexer proxy (e.g. toggle its status)."""
     return await _req("POST", f"indexerproxy/action/{_id(name)}", body=body)
@@ -665,7 +657,7 @@ async def prowlarr_indexer_proxy_action(name: str, body: JSONObj) -> JSONObj:
 
 # --- Indexer Stats / Status ----------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_get_indexer_stats(
     start_date: str = "",
     end_date: str = "",
@@ -691,7 +683,6 @@ async def prowlarr_get_indexer_stats(
     )
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_list_indexer_status() -> JSONVal:
     """List indexer status records (current failure/backoff state and most
     recent failure per indexer)."""
@@ -700,13 +691,12 @@ async def prowlarr_list_indexer_status() -> JSONVal:
 
 # --- Localization ---------------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_get_localization() -> JSONObj:
     """Get the localization string table for the configured UI language."""
     return await _req("GET", "localization")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_list_localization_options() -> JSONVal:
     """List the available UI languages and their cultures."""
     return await _req("GET", "localization/options")
@@ -714,7 +704,7 @@ async def prowlarr_list_localization_options() -> JSONVal:
 
 # --- Logs -----------------------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_list_logs(
     page: int = 1,
     page_size: int = 10,
@@ -739,25 +729,21 @@ async def prowlarr_list_logs(
     )
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_list_log_files() -> JSONVal:
     """List the application log files available for download."""
     return await _req("GET", "log/file")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_get_log_file(filename: str) -> str:
     """Return the raw contents of an application log file."""
     return await _req_text(f"log/file/{quote(filename)}")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_list_update_log_files() -> JSONVal:
     """List the update log files available for download."""
     return await _req("GET", "log/file/update")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_get_update_log_file(filename: str) -> str:
     """Return the raw contents of an update log file."""
     return await _req_text(f"log/file/update/{quote(filename)}")
@@ -765,7 +751,7 @@ async def prowlarr_get_update_log_file(filename: str) -> str:
 
 # --- Newznab ----------------------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_search_newznab(
     id: int,
     t: str = "",
@@ -845,68 +831,71 @@ async def prowlarr_search_newznab(
     )
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_download_release(id: int, link: str = "", file: str = "") -> str:
     """Download a release (NZB/torrent) through an indexer. id is the indexer
     id; pass either the download link or the stored file name. Returns the file
     bytes base64-encoded as a string."""
-    return await _req_b64(f"indexer/{_id(id)}/download", _omit({"link": link, "file": file}))
+    return await _req_b64(
+        f"indexer/{_id(id)}/download", _omit({"link": link, "file": file})
+    )
 
 
 # --- Notifications -----------------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_list_notifications() -> JSONVal:
     """List all configured notification connections (Discord, Telegram, etc.)."""
     return await _req("GET", "notification")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_get_notification(id: int) -> JSONObj:
     """Get a single notification by id."""
     return await _req("GET", f"notification/{_id(id)}")
 
 
-@mcp.tool
-async def prowlarr_create_notification(body: JSONObj, force_save: bool | None = None) -> JSONObj:
+async def prowlarr_create_notification(
+    body: JSONObj, force_save: bool | None = None
+) -> JSONObj:
     """Create a notification. body is a NotificationResource (fetch
     prowlarr_list_notification_schemas for providers). force_save bypasses
     validation."""
     return await _req("POST", "notification", _omit({"forceSave": force_save}), body)
 
 
-@mcp.tool
-async def prowlarr_update_notification(id: int, body: JSONObj, force_save: bool | None = None) -> JSONObj:
+async def prowlarr_update_notification(
+    id: int, body: JSONObj, force_save: bool | None = None
+) -> JSONObj:
     """Update a notification by id."""
-    return await _req("PUT", f"notification/{_id(id)}", _omit({"forceSave": force_save}), body)
+    return await _req(
+        "PUT", f"notification/{_id(id)}", _omit({"forceSave": force_save}), body
+    )
 
 
-@mcp.tool(annotations=DESTRUCTIVE)
 async def prowlarr_delete_notification(id: int) -> JSONObj:
     """Delete a notification by id."""
     return await _req("DELETE", f"notification/{_id(id)}")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_list_notification_schemas() -> JSONVal:
     """List notification provider schemas. Read this before creating or
     updating a notification."""
     return await _req("GET", "notification/schema")
 
 
-@mcp.tool
-async def prowlarr_test_notification(body: JSONObj, force_test: bool | None = None) -> JSONObj:
+async def prowlarr_test_notification(
+    body: JSONObj, force_test: bool | None = None
+) -> JSONObj:
     """Send a test message through a notification connection without saving it."""
-    return await _req("POST", "notification/test", _omit({"forceTest": force_test}), body)
+    return await _req(
+        "POST", "notification/test", _omit({"forceTest": force_test}), body
+    )
 
 
-@mcp.tool
 async def prowlarr_test_all_notifications() -> JSONObj:
     """Send a test message through every configured notification."""
     return await _req("POST", "notification/testall")
 
 
-@mcp.tool
 async def prowlarr_notification_action(name: str, body: JSONObj) -> JSONObj:
     """Run a named action on a notification (e.g. a custom provider action)."""
     return await _req("POST", f"notification/action/{_id(name)}", body=body)
@@ -914,13 +903,12 @@ async def prowlarr_notification_action(name: str, body: JSONObj) -> JSONObj:
 
 # --- Ping / Search ------------------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_ping() -> JSONObj:
     """Liveness probe. Returns {"status": "OK"} when the server is reachable."""
     return await _req("GET", "/ping")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_search_releases(
     query: str = "",
     type: str = "",
@@ -948,14 +936,12 @@ async def prowlarr_search_releases(
     )
 
 
-@mcp.tool
 async def prowlarr_push_release(body: JSONObj) -> JSONObj:
     """Send a release to the configured download clients. body is a
     ReleaseResource (get one from a prowlarr_search_releases result)."""
     return await _req("POST", "search", body=body)
 
 
-@mcp.tool
 async def prowlarr_bulk_push_releases(body: list[dict[str, Any]]) -> JSONObj:
     """Send multiple releases to the configured download clients at once. body
     is a list of ReleaseResource objects."""
@@ -964,32 +950,28 @@ async def prowlarr_bulk_push_releases(body: list[dict[str, Any]]) -> JSONObj:
 
 # --- System ---------------------------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_system_status() -> JSONObj:
     """Get system status: version, runtime (docker/os), start time, app data
     path, is-mono, migration version, and whether a branch update is pending."""
     return await _req("GET", "system/status")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_list_system_routes() -> JSONObj:
     """List the API routes the server exposes."""
     return await _req("GET", "system/routes")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_list_system_routes_duplicate() -> JSONObj:
     """List API routes with duplicate bindings (route conflict diagnostics)."""
     return await _req("GET", "system/routes/duplicate")
 
 
-@mcp.tool(annotations=DESTRUCTIVE)
 async def prowlarr_system_shutdown() -> JSONObj:
     """Shut down the Prowlarr server. Destructive -- the server goes offline."""
     return await _req("POST", "system/shutdown")
 
 
-@mcp.tool(annotations=DESTRUCTIVE)
 async def prowlarr_system_restart() -> JSONObj:
     """Restart the Prowlarr server. Destructive -- the server goes offline
     briefly."""
@@ -998,45 +980,39 @@ async def prowlarr_system_restart() -> JSONObj:
 
 # --- Tags --------------------------------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_list_tags() -> JSONVal:
     """List all tags, usable on indexers, applications, download clients,
     proxies, and notifications."""
     return await _req("GET", "tag")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_get_tag(id: int) -> JSONObj:
     """Get a single tag by id."""
     return await _req("GET", f"tag/{_id(id)}")
 
 
-@mcp.tool
 async def prowlarr_create_tag(body: JSONObj) -> JSONObj:
     """Create a tag. body is a TagResource with a `label` (e.g. {"label": "hd"})."""
     return await _req("POST", "tag", body=body)
 
 
-@mcp.tool
 async def prowlarr_update_tag(id: int, body: JSONObj) -> JSONObj:
     """Update a tag by id."""
     return await _req("PUT", f"tag/{_id(id)}", body=body)
 
 
-@mcp.tool(annotations=DESTRUCTIVE)
 async def prowlarr_delete_tag(id: int) -> JSONObj:
     """Delete a tag by id. Fails if the tag is still in use."""
     return await _req("DELETE", f"tag/{_id(id)}")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_list_tag_details() -> JSONVal:
     """List tags with the count of indexers, applications, download clients,
     proxies, and notifications using each one."""
     return await _req("GET", "tag/detail")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_get_tag_details(id: int) -> JSONObj:
     """Get tag details (with usage counts) for a single tag by id."""
     return await _req("GET", f"tag/detail/{_id(id)}")
@@ -1044,14 +1020,13 @@ async def prowlarr_get_tag_details(id: int) -> JSONObj:
 
 # --- Tasks -------------------------------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_list_tasks() -> JSONVal:
     """List all scheduled background tasks (indexer sync, RSS sync, health
     checks, backup) with their next run times."""
     return await _req("GET", "system/task")
 
 
-@mcp.tool(annotations=READONLY)
 async def prowlarr_get_task(id: int) -> JSONObj:
     """Get a single scheduled task by id."""
     return await _req("GET", f"system/task/{_id(id)}")
@@ -1059,18 +1034,277 @@ async def prowlarr_get_task(id: int) -> JSONObj:
 
 # --- Updates -----------------------------------------------------------------------------------
 
-@mcp.tool(annotations=READONLY)
+
 async def prowlarr_list_updates() -> JSONVal:
     """List recent releases/updates for Prowlarr (version, release date,
     changes)."""
     return await _req("GET", "update")
 
 
+# Resource groups for portmanteau registration. Every tool function name
+# must appear in exactly one group - see test_all_functions_grouped.
+_GROUPS: dict[str, tuple[str, ...]] = {
+    "prowlarr_system": (
+        "prowlarr_cancel_command",
+        "prowlarr_delete_backup",
+        "prowlarr_get_api_info",
+        "prowlarr_get_command",
+        "prowlarr_get_filesystem_type",
+        "prowlarr_get_localization",
+        "prowlarr_get_log_file",
+        "prowlarr_get_task",
+        "prowlarr_get_update_log_file",
+        "prowlarr_list_backups",
+        "prowlarr_list_commands",
+        "prowlarr_list_filesystem",
+        "prowlarr_list_health",
+        "prowlarr_list_localization_options",
+        "prowlarr_list_log_files",
+        "prowlarr_list_logs",
+        "prowlarr_list_system_routes",
+        "prowlarr_list_system_routes_duplicate",
+        "prowlarr_list_tasks",
+        "prowlarr_list_update_log_files",
+        "prowlarr_list_updates",
+        "prowlarr_restore_backup",
+        "prowlarr_restore_backup_upload",
+        "prowlarr_run_command",
+        "prowlarr_system_restart",
+        "prowlarr_system_shutdown",
+        "prowlarr_system_status",
+    ),
+    "prowlarr_applications": (
+        "prowlarr_application_action",
+        "prowlarr_bulk_delete_applications",
+        "prowlarr_bulk_update_applications",
+        "prowlarr_create_app_profile",
+        "prowlarr_create_application",
+        "prowlarr_delete_app_profile",
+        "prowlarr_delete_application",
+        "prowlarr_get_app_profile",
+        "prowlarr_get_application",
+        "prowlarr_list_app_profile_schemas",
+        "prowlarr_list_app_profiles",
+        "prowlarr_list_application_schemas",
+        "prowlarr_list_applications",
+        "prowlarr_test_all_applications",
+        "prowlarr_test_application",
+        "prowlarr_update_app_profile",
+        "prowlarr_update_application",
+    ),
+    "prowlarr_indexers": (
+        "prowlarr_bulk_delete_indexers",
+        "prowlarr_bulk_update_indexers",
+        "prowlarr_create_indexer",
+        "prowlarr_delete_indexer",
+        "prowlarr_get_indexer",
+        "prowlarr_get_indexer_stats",
+        "prowlarr_indexer_action",
+        "prowlarr_list_indexer_categories",
+        "prowlarr_list_indexer_schemas",
+        "prowlarr_list_indexer_status",
+        "prowlarr_list_indexers",
+        "prowlarr_test_all_indexers",
+        "prowlarr_test_indexer",
+        "prowlarr_update_indexer",
+    ),
+    "prowlarr_config": (
+        "prowlarr_create_custom_filter",
+        "prowlarr_delete_custom_filter",
+        "prowlarr_get_custom_filter",
+        "prowlarr_get_development_config",
+        "prowlarr_get_download_client_config",
+        "prowlarr_get_host_config",
+        "prowlarr_get_ui_config",
+        "prowlarr_list_custom_filters",
+        "prowlarr_update_custom_filter",
+        "prowlarr_update_development_config",
+        "prowlarr_update_download_client_config",
+        "prowlarr_update_host_config",
+        "prowlarr_update_ui_config",
+    ),
+    "prowlarr_download_clients": (
+        "prowlarr_bulk_delete_download_clients",
+        "prowlarr_bulk_update_download_clients",
+        "prowlarr_create_download_client",
+        "prowlarr_delete_download_client",
+        "prowlarr_download_client_action",
+        "prowlarr_get_download_client",
+        "prowlarr_list_download_client_schemas",
+        "prowlarr_list_download_clients",
+        "prowlarr_test_all_download_clients",
+        "prowlarr_test_download_client",
+        "prowlarr_update_download_client",
+    ),
+    "prowlarr_indexer_proxies": (
+        "prowlarr_create_indexer_proxy",
+        "prowlarr_delete_indexer_proxy",
+        "prowlarr_get_indexer_proxy",
+        "prowlarr_indexer_proxy_action",
+        "prowlarr_list_indexer_proxies",
+        "prowlarr_list_indexer_proxy_schemas",
+        "prowlarr_test_all_indexer_proxies",
+        "prowlarr_test_indexer_proxy",
+        "prowlarr_update_indexer_proxy",
+    ),
+    "prowlarr_notifications": (
+        "prowlarr_create_notification",
+        "prowlarr_delete_notification",
+        "prowlarr_get_notification",
+        "prowlarr_list_notification_schemas",
+        "prowlarr_list_notifications",
+        "prowlarr_notification_action",
+        "prowlarr_test_all_notifications",
+        "prowlarr_test_notification",
+        "prowlarr_update_notification",
+    ),
+    "prowlarr_tags": (
+        "prowlarr_create_tag",
+        "prowlarr_delete_tag",
+        "prowlarr_get_tag",
+        "prowlarr_get_tag_details",
+        "prowlarr_list_tag_details",
+        "prowlarr_list_tags",
+        "prowlarr_update_tag",
+    ),
+    "prowlarr_search": (
+        "prowlarr_bulk_push_releases",
+        "prowlarr_download_release",
+        "prowlarr_ping",
+        "prowlarr_push_release",
+        "prowlarr_search_newznab",
+        "prowlarr_search_releases",
+    ),
+    "prowlarr_history": (
+        "prowlarr_list_history",
+        "prowlarr_list_history_indexer",
+        "prowlarr_list_history_since",
+    ),
+}
+
+
+def _op_line(name: str, fn: Any) -> str:
+    """One line of a group tool's description: signature + one-line doc."""
+    sig = ", ".join(
+        p.name if p.default is inspect.Parameter.empty else f"{p.name}={p.default!r}"
+        for p in inspect.signature(fn).parameters.values()
+    )
+    return f"- {name}({sig}) — {' '.join((fn.__doc__ or '').split())}"
+
+
+def _register_group(
+    group: str, names: tuple[str, ...], ns: dict[str, Any], readonly_names: set[str]
+) -> None:
+    """Register one dispatching tool that fans out to every function named
+    in `names`. The functions themselves are untouched - they're just
+    looked up by name instead of each becoming its own tool."""
+    fns = {n: ns[n] for n in names}
+
+    async def dispatch(
+        operation: str, arguments: JSONObj | None = None
+    ) -> JSONVal | str:
+        # `| str` covers the handful of operations (log/newznab/download) that
+        # return raw text or base64 instead of decoded JSON.
+        fn = fns.get(operation)
+        if fn is None:
+            raise ToolError(
+                f"Unknown operation {operation!r} for {group}. Valid: {', '.join(fns)}"
+            )
+        return await fn(**(arguments or {}))
+
+    dispatch.__annotations__["operation"] = Literal[names]
+    ann = READONLY if set(names) <= readonly_names else None
+    mcp.add_tool(
+        Tool.from_function(
+            dispatch,
+            name=group,
+            description=(
+                f"{group.replace('_', ' ')} operations on Prowlarr. Pass `operation` and an "
+                f"`arguments` dict matching that operation's parameters.\n\n"
+                + "\n".join(_op_line(n, f) for n, f in fns.items())
+            ),
+            annotations=ann,
+        )
+    )
+
+
+def _register_tools() -> None:
+    ns = globals()
+    readonly_names: set[str] = {
+        "prowlarr_download_release",
+        "prowlarr_get_api_info",
+        "prowlarr_get_app_profile",
+        "prowlarr_get_application",
+        "prowlarr_get_command",
+        "prowlarr_get_custom_filter",
+        "prowlarr_get_development_config",
+        "prowlarr_get_download_client",
+        "prowlarr_get_download_client_config",
+        "prowlarr_get_filesystem_type",
+        "prowlarr_get_host_config",
+        "prowlarr_get_indexer",
+        "prowlarr_get_indexer_proxy",
+        "prowlarr_get_indexer_stats",
+        "prowlarr_get_localization",
+        "prowlarr_get_log_file",
+        "prowlarr_get_notification",
+        "prowlarr_get_tag",
+        "prowlarr_get_tag_details",
+        "prowlarr_get_task",
+        "prowlarr_get_ui_config",
+        "prowlarr_get_update_log_file",
+        "prowlarr_list_app_profile_schemas",
+        "prowlarr_list_app_profiles",
+        "prowlarr_list_application_schemas",
+        "prowlarr_list_applications",
+        "prowlarr_list_backups",
+        "prowlarr_list_commands",
+        "prowlarr_list_custom_filters",
+        "prowlarr_list_download_client_schemas",
+        "prowlarr_list_download_clients",
+        "prowlarr_list_filesystem",
+        "prowlarr_list_health",
+        "prowlarr_list_history",
+        "prowlarr_list_history_indexer",
+        "prowlarr_list_history_since",
+        "prowlarr_list_indexer_categories",
+        "prowlarr_list_indexer_proxies",
+        "prowlarr_list_indexer_proxy_schemas",
+        "prowlarr_list_indexer_schemas",
+        "prowlarr_list_indexer_status",
+        "prowlarr_list_indexers",
+        "prowlarr_list_localization_options",
+        "prowlarr_list_log_files",
+        "prowlarr_list_logs",
+        "prowlarr_list_notification_schemas",
+        "prowlarr_list_notifications",
+        "prowlarr_list_system_routes",
+        "prowlarr_list_system_routes_duplicate",
+        "prowlarr_list_tag_details",
+        "prowlarr_list_tags",
+        "prowlarr_list_tasks",
+        "prowlarr_list_update_log_files",
+        "prowlarr_list_updates",
+        "prowlarr_ping",
+        "prowlarr_search_newznab",
+        "prowlarr_search_releases",
+        "prowlarr_system_status",
+    }
+    for group, names in _GROUPS.items():
+        _register_group(group, names, ns, readonly_names)
+
+
+_register_tools()
+
+
 def main() -> None:
     global _client
     url = os.environ.get("PROWLARR_URL")
     if not url:
-        print("PROWLARR_URL environment variable is required (e.g. http://localhost:9696)", file=sys.stderr)
+        print(
+            "PROWLARR_URL environment variable is required (e.g. http://localhost:9696)",
+            file=sys.stderr,
+        )
         raise SystemExit(1)
     _client = build_client(url, os.environ.get("PROWLARR_API_KEY"))
     mcp.run()

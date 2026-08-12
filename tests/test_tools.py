@@ -54,9 +54,15 @@ async def server(recorder, monkeypatch):
     await client.aclose()
 
 
+_OP_GROUP = {op: group for group, ops in prowlarr_mcp._GROUPS.items() for op in ops}
+
+
 async def call(server, tool, **kwargs):
+    """Call `tool` (an operation name) through the portmanteau group tool
+    that now hosts it, so every existing per-operation test keeps working
+    unmodified aside from this helper."""
     async with Client(server) as c:
-        return await c.call_tool(tool, kwargs)
+        return await c.call_tool(_OP_GROUP[tool], {"operation": tool, "arguments": kwargs})
 
 
 # --- one test per endpoint --------------------------------------------------
@@ -335,3 +341,28 @@ def test_main_requires_prowlarr_url(monkeypatch):
     monkeypatch.delenv("PROWLARR_URL", raising=False)
     with pytest.raises(SystemExit):
         prowlarr_mcp.main()
+
+
+# --- portmanteau grouping safety net ------------------------------------------
+
+def test_all_tools_grouped():
+    """Every tool in TOOLS must land in exactly one portmanteau group - this
+    is the safety net for the group-tool consolidation."""
+    tool_names = {t[0] for t in TOOLS}
+    grouped_names = [n for names in prowlarr_mcp._GROUPS.values() for n in names]
+    assert sorted(grouped_names) == sorted(tool_names)
+    assert len(grouped_names) == len(set(grouped_names))
+
+
+async def test_group_tools_are_the_only_registered_tools(server):
+    async with Client(server) as c:
+        tools = await c.list_tools()
+    assert {t.name for t in tools} == set(prowlarr_mcp._GROUPS)
+
+
+async def test_unknown_operation_rejected_by_schema(server):
+    # The Literal[...] enum on `operation` means an invalid value never
+    # reaches _register_group's dispatch body - pydantic rejects it first.
+    with pytest.raises(ToolError, match="validation error"):
+        async with Client(server) as c:
+            await c.call_tool("prowlarr_tags", {"operation": "not_a_real_operation"})
