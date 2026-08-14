@@ -1,6 +1,6 @@
 # prowlarr-mcp
 
-Part of the [arr-mcps](https://github.com/SavageCore/arr-mcps) collection.
+Part of the [arr-mcps](https://github.com/arr-mcps/arr-mcps) collection.
 MCP server exposing [Prowlarr](https://github.com/Prowlarr/Prowlarr)'s API v1
 (REST) as tools, so an LLM can manage your indexers, applications, download
 clients, indexer proxies, notifications, tags, and custom filters — plus run
@@ -16,7 +16,7 @@ Every `/api/v1` endpoint requires it, sent as the `X-Api-Key` header.
 
 ## Install
 
-Download a wheel from the [latest release](https://github.com/SavageCore/prowlarr-mcp/releases/latest)
+Download a wheel from the [latest release](https://github.com/arr-mcps/prowlarr-mcp/releases/latest)
 and install it as a `uv` tool (no repo checkout needed):
 
 ```bash
@@ -102,7 +102,7 @@ make help  # list all commands
 | `make clean` | Remove build artifacts |
 
 The release workflow (`.github/workflows/release.yml`) builds and publishes to
-[Releases](https://github.com/SavageCore/prowlarr-mcp/releases) whenever a `v*`
+[Releases](https://github.com/arr-mcps/prowlarr-mcp/releases) whenever a `v*`
 tag is pushed - so the usual flow is `make bump-patch`, commit, then tag and
 push.
 
