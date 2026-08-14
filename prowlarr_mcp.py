@@ -70,10 +70,7 @@ async def _req_raw(
     full = path if path.startswith("/") else f"{API_V1}/{path}"
     r = await _client.request(method, full, params=params, json=body, content=content)
     if r.status_code >= 400:
-        try:
-            msg = r.json().get("message", r.text)
-        except ValueError:
-            msg = r.text
+        msg = _error_message(r)
         raise ToolError(f"Prowlarr API {r.status_code}: {msg}")
     return r
 
@@ -111,6 +108,35 @@ def _id(id: int) -> str:
 def _omit(params: dict[str, Any]) -> dict[str, Any]:
     """Drop keys whose values are empty/None so the API's defaults apply."""
     return {k: v for k, v in params.items() if v not in ("", None)}
+
+
+def _error_message(r: httpx.Response) -> str:
+    """Extract a human-readable message from a non-2xx response.
+
+    Prowlarr returns validation failures as a JSON array of error objects
+    (e.g. [{"propertyName": ..., "errorMessage": ...}]) rather than a single
+    {"message": ...} dict, so handle dict, list, and raw text."""
+    try:
+        data = r.json()
+    except ValueError:
+        return r.text
+    if isinstance(data, dict):
+        for key in ("message", "errorMessage", "error"):
+            if key in data:
+                return str(data[key])
+        return str(data)
+    if isinstance(data, list):
+        lines = []
+        for item in data:
+            if isinstance(item, dict):
+                prop = item.get("propertyName") or item.get("property")
+                err = item.get("errorMessage") or item.get("message")
+                if err:
+                    lines.append(f"{prop + ': ' if prop else ''}{err}")
+            elif item is not None:
+                lines.append(str(item))
+        return "; ".join(lines) if lines else str(data)
+    return str(data)
 
 
 # --- ApiInfo ------------------------------------------------------------------
